@@ -1,30 +1,29 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 from mongodb_manager import MongoDBClient
 from neo4j_manager import Neo4jGraph, Node
-
 
 class MovieApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Movie Viewer")
         self.root.state('zoomed')
-        self.root.bind("<Button-1>", self.print_click_coordinates)
         self.root.bind("<Configure>", self.adjust_button_widths)
 
-        self.mongo_client = MongoDBClient("mongodb://localhost:27017/", "imdb")
-        self.neo4j_client = Neo4jGraph("bolt://127.0.0.1:7687", "neo4j", "password")
+        self.mongo_client = None
+        self.neo4j_client = None
 
         self.page_size = 25
         self.current_page = 0
+        self.current_movie = None
 
         self.setup_ui()
-        self.load_movies()
+        self.connect_to_mongo()
 
     def setup_ui(self):
         self.create_main_frame()
-        self.create_scrollable_frame()
-        self.create_button_frame()
+        self.create_main_scrollable_frame()
+        self.create_main_button_frame()
 
     def create_main_frame(self):
         self.main_frame = tk.Frame(self.root)
@@ -32,7 +31,7 @@ class MovieApp:
         self.main_frame.grid_rowconfigure(0, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
-    def create_scrollable_frame(self):
+    def create_main_scrollable_frame(self):
         self.canvas = tk.Canvas(self.main_frame)
         self.scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=self.canvas.yview)
         self.scrollable_frame = ttk.Frame(self.canvas)
@@ -44,12 +43,14 @@ class MovieApp:
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
 
-        # Enlazar eventos de desplazamiento del ratón
+        self.bind_mouse_scroll_events()
+
+    def bind_mouse_scroll_events(self):
         self.canvas.bind_all("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind_all("<Button-4>", self.on_mousewheel)
         self.canvas.bind_all("<Button-5>", self.on_mousewheel)
 
-    def create_button_frame(self):
+    def create_main_button_frame(self):
         self.button_frame = tk.Frame(self.root)
         self.button_frame.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
 
@@ -59,26 +60,55 @@ class MovieApp:
         self.next_button = tk.Button(self.button_frame, text="Next", command=self.next_page)
         self.next_button.grid(row=0, column=1, sticky="ew")
 
+        self.retry_mongo_button = tk.Button(self.button_frame, text="Retry MongoDB Connection", command=self.connect_to_mongo)
+        self.retry_mongo_button.grid(row=0, column=2, sticky="ew")
+        self.retry_mongo_button.grid_remove()
+
+    def connect_to_mongo(self):
+        try:
+            self.mongo_client = MongoDBClient("mongodb://localhost:27017/", "imdb")
+            self.load_movies()
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to connect to MongoDB: {e}")
+            self.retry_mongo_button.grid()
+
+    def connect_to_neo4j(self):
+        try:
+            self.neo4j_client = Neo4jGraph("bolt://127.0.0.1:7687", "neo4j", "password")
+            self.load_reviews()
+        except Exception as e:
+            messagebox.showerror("Connection Error", f"Failed to connect to Neo4j: {e}")
+            self.retry_neo4j_button.grid()
+
     def load_movies(self):
-        movies = self.mongo_client.fetch_documents_with_limit("movies", self.current_page * self.page_size, self.page_size)
+        if not self.mongo_client:
+            self.retry_mongo_button.grid()
+            return
+
+        movies = self.fetch_movies()
         self.clear_scrollable_frame()
 
         if not movies:
-            self.display_no_records_message()
+            messagebox.showwarning("Database Error", f"No movies found")
             return
 
-        self.populate_movies(movies)
+        self.retry_mongo_button.grid_remove()
+        self.display_movies(movies)
         self.adjust_button_widths()
+
+    def fetch_movies(self):
+        try:
+            return self.mongo_client.fetch_documents_with_limit("movies", self.current_page * self.page_size, self.page_size)
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to fetch movies: {e}")
+            self.retry_mongo_button.grid()
+            return []
 
     def clear_scrollable_frame(self):
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
 
-    def display_no_records_message(self):
-        label = tk.Label(self.scrollable_frame, text="No more records.")
-        label.pack()
-
-    def populate_movies(self, movies):
+    def display_movies(self, movies):
         for idx, movie in enumerate(movies, start=self.current_page * self.page_size + 1):
             movie_display = {k: v for k, v in movie.items() if k != '_id'}
             self.create_movie_button(idx, movie_display)
@@ -112,20 +142,26 @@ class MovieApp:
             widget.config(width=button_width)
 
     def show_movie_details(self, movie):
-        print(f"Showing details for movie: {movie}")
+        self.current_movie = movie
+        self.setup_details_ui()
+        self.display_movie_details()
+        self.connect_to_neo4j()
+
+    def setup_details_ui(self):
         self.hide_main_frame()
-        self.create_details_frame(movie)
+        self.create_details_frame()
+        self.create_details_scrollable_frame()
+        self.create_details_button_frame()
 
     def hide_main_frame(self):
         self.main_frame.grid_forget()
         self.button_frame.grid_forget()
 
-    def create_details_frame(self, movie):
+    def create_details_frame(self):
         self.details_frame = tk.Frame(self.root)
         self.details_frame.grid(row=0, column=0, sticky="nsew")
-
-        self.create_details_scrollable_frame()
-        self.populate_movie_details(movie)
+        self.details_frame.grid_rowconfigure(0, weight=1)
+        self.details_frame.grid_columnconfigure(0, weight=1)
 
     def create_details_scrollable_frame(self):
         self.details_canvas = tk.Canvas(self.details_frame)
@@ -139,29 +175,47 @@ class MovieApp:
         self.details_canvas.grid(row=0, column=0, sticky="nsew")
         self.details_scrollbar.grid(row=0, column=1, sticky="ns")
 
-        self.details_frame.grid_rowconfigure(0, weight=1)
-        self.details_frame.grid_columnconfigure(0, weight=1)
+        self.bind_mouse_scroll_events()
 
-        # Enlazar eventos de desplazamiento del ratón
-        self.details_canvas.bind_all("<MouseWheel>", self.on_mousewheel)
-        self.details_canvas.bind_all("<Button-4>", self.on_mousewheel)
-        self.details_canvas.bind_all("<Button-5>", self.on_mousewheel)
+    def create_details_button_frame(self):
+        self.details_button_frame = tk.Frame(self.root)
+        self.details_button_frame.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
 
-    def populate_movie_details(self, movie):
-        title = movie['TITLE']
-        reviews = self.neo4j_client.get_incoming_related_nodes("BELONGS_TO", Node("Movie", {"title": title}))
+        self.back_button = tk.Button(self.details_button_frame, text="Back to List", command=self.back_to_list)
+        self.back_button.grid(row=0, column=0, pady=10)
 
-        row_index = self.display_movie_info(movie, row_index=0)
-        row_index = self.display_reviews(reviews, row_index)
-        self.create_back_button(row_index)
+        self.retry_neo4j_button = tk.Button(self.details_button_frame, text="Retry Neo4j Connection", command=self.connect_to_neo4j)
+        self.retry_neo4j_button.grid(row=0, column=1, pady=10)
+        self.retry_neo4j_button.grid_remove()
 
-    def display_movie_info(self, movie, row_index):
+    def load_reviews(self):
+        if not self.neo4j_client:
+            self.retry_neo4j_button.grid()
+            return
+
+        title = self.current_movie['TITLE']
+        reviews = self.fetch_reviews(title)
+
+        self.retry_neo4j_button.grid_remove()
+        self.display_reviews(reviews, 4)
+
+    def display_movie_details(self):
+        movie = self.current_movie
+        row_index = 0
         for key, value in movie.items():
             if key != '_id':
                 label = tk.Label(self.details_scrollable_frame, text=f"{key}: {value}", wraplength=600, justify="left")
                 label.grid(row=row_index, column=0, sticky="ew", padx=5, pady=2)
                 row_index += 1
         return row_index
+
+    def fetch_reviews(self, title):
+        try:
+            return self.neo4j_client.get_incoming_related_nodes("BELONGS_TO", Node("Movie", {"title": title}))
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to fetch reviews: {e}")
+            self.retry_neo4j_button.grid()
+            return
 
     def display_reviews(self, reviews, row_index):
         reviews_label = tk.Label(self.details_scrollable_frame, text="Reviews:", font=("Helvetica", 12, "bold"))
@@ -192,30 +246,46 @@ class MovieApp:
         content_label = tk.Label(review_frame, text=f"Content: {review.properties['content']}", wraplength=600, justify="left")
         content_label.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
 
-    def create_back_button(self, row_index):
-        back_button = tk.Button(self.details_scrollable_frame, text="Back to List", command=self.back_to_list)
-        back_button.grid(row=row_index, column=0, pady=10)
-
     def back_to_list(self):
-        print("Returning to movie list")
         self.details_frame.destroy()
+        self.details_button_frame.destroy()
         self.main_frame.grid(row=0, column=0, sticky="nsew")
         self.button_frame.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
 
     def next_page(self):
-        print("Next page")
-        if len(self.mongo_client.fetch_documents_with_limit("movies", (self.current_page + 1) * self.page_size, 1)) > 0:
-            self.current_page += 1
-            self.load_movies()
+        if not self.mongo_client:
+            messagebox.showerror("Connection Error", f"MongoDB connection not founded")
+            self.retry_mongo_button.grid()
+            return
+
+        try:
+            if self.has_more_movies():
+                self.current_page += 1
+                self.load_movies()
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to fetch movies: {e}")
+            self.retry_mongo_button.grid()
+
+    def has_more_movies(self):
+        next_page_index = (self.current_page + 1) * self.page_size
+        movies = self.fetch_movies_for_next_page(next_page_index)
+        return len(movies) > 0
+
+    def fetch_movies_for_next_page(self, start_index):
+        return self.mongo_client.fetch_documents_with_limit("movies", start_index, 1)
 
     def prev_page(self):
-        print("Previous page")
-        if self.current_page > 0:
-            self.current_page -= 1
-            self.load_movies()
-
-    def print_click_coordinates(self, event):
-        print(f"Click coordinates: x={event.x}, y={event.y}")
+        if not self.mongo_client:
+            messagebox.showerror("Connection Error", f"MongoDB connection not founded")
+            self.retry_mongo_button.grid()
+            return
+        try:
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.load_movies()
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to fetch movies: {e}")
+            self.retry_mongo_button.grid()
 
     def on_mousewheel(self, event):
         if event.delta:
